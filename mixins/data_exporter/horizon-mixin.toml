@@ -1,0 +1,176 @@
+[mod]
+id = "data_exporter"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
+
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "data_exporter"
+source = "runtime.rs"
+
+[[module]]
+id = "glue"
+file = "crates/horizon-client/src/game.rs"
+name = "data_exporter_glue"
+source = "glue.rs"
+
+[[injection]]
+id = "logged-in"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_logged_in"
+helper = "on_logged_in.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+[[injection]]
+id = "logged-out"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_logged_out"
+helper = "on_logged_out.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+[[injection]]
+id = "changed-dimension"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_changed_dimension"
+helper = "on_changed_dimension.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "from", ty = "&str", value = "from" },
+  { name = "to", ty = "&str", value = "to" },
+]
+
+[[injection]]
+id = "player-tick"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_tick"
+helper = "on_player_tick.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+[[injection]]
+id = "block-broken"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_destroy_block"
+helper = "on_block_broken.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "pos", ty = "[i32;3]", value = "pos" },
+  { name = "state", ty = "horizon_world::registry::BlockStateId", value = "state" },
+]
+
+[[injection]]
+id = "block-placed"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_place_block"
+helper = "on_block_placed.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "stack", ty = "&horizon_client::items::ItemStack", value = "stack" },
+  { name = "pos", ty = "[i32;3]", value = "pos" },
+  { name = "state", ty = "horizon_world::registry::BlockStateId", value = "state" },
+]
+
+[[injection]]
+id = "died"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_died"
+helper = "on_died.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "cause", ty = "Option<&str>", value = "cause" },
+]
+
+[[injection]]
+id = "crafted"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_item_crafted"
+helper = "on_crafted.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "recipe", ty = "&str", value = "recipe" },
+  { name = "stack", ty = "&horizon_client::items::ItemStack", value = "stack" },
+]
+
+[[injection]]
+id = "picked-up"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_item_picked_up"
+helper = "on_picked_up.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "item", ty = "&str", value = "item" },
+  { name = "count", ty = "u32", value = "count" },
+]
+
+[[injection]]
+id = "advancement"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_advancement_done"
+helper = "on_advancement.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "advancement", ty = "&str", value = "advancement" },
+]
+
+# Not the `player_stat_award` hook point: the game only calls it when a trait mod is loaded.
+[[injection]]
+id = "stat-award"
+kind = "HEAD"
+target = "horizon_client::game::stats::Game<'_>::award_stat"
+helper = "on_stat_award.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "stat_type", ty = "&str", value = "ty" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "amount", ty = "i32", value = "n" },
+]
+
+[[injection]]
+id = "listed"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "on_listed.rs"
+bindings = [
+  { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" },
+]
+
+[[injection]]
+id = "settings"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings"
+helper = "on_settings.rs"
+bindings = [
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "buttons", ty = "&mut Vec<String>", value = "&mut *buttons" },
+]
+
+[[injection]]
+id = "settings-click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "on_settings_click.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "mod_id", ty = "&str", value = "mod_id" },
+  { name = "button", ty = "usize", value = "button" },
+]
