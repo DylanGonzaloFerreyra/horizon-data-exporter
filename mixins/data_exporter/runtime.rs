@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const ID: &str = "data_exporter";
 pub const NAME: &str = "Data Exporter";
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.1.1";
 pub const DESCRIPTION: &str = "Saves what happens in your game and your statistics to files on your computer, ready to analyze. Nothing is sent over the network.";
 
 /// The profile's file name in the game's `config/` folder.
@@ -24,6 +24,9 @@ const SCHEMA: i64 = 1;
 const QUEUE: usize = 65_536;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 const CHECK_PROFILE_EVERY: Duration = Duration::from_secs(1);
+/// While the disk limit is reached, how often the folder is measured again, so that saving
+/// resumes once the player frees space.
+const RECHECK_FULL_EVERY: Duration = Duration::from_secs(5);
 
 /// One kind of data: its id (in the profile and in the folders), and its group of buttons.
 pub struct Kind {
@@ -488,7 +491,14 @@ struct Writer {
     files: HashMap<FileKey, Open>,
     root: Option<PathBuf>,
     used: u64,
+    /// The disk limit was reached: records are dropped until a new measure of the folder, or a
+    /// higher limit, makes room again.
     full: bool,
+    /// The limit `full` was decided against: a raised one is measured again at once.
+    full_limit: u64,
+    /// When the folder was last measured while `full`.
+    measured: Option<Instant>,
+    recheck_every: Duration,
 }
 
 /// Bytes under `dir`, counting only the files this mod writes.
@@ -518,7 +528,7 @@ fn folder_size(dir: &Path) -> u64 {
 #[derive(Debug, PartialEq, Eq)]
 enum Wrote {
     Saved,
-    /// The disk limit: nothing more is saved until the player makes room.
+    /// The disk limit: nothing is saved until the player makes room or raises the limit.
     Full,
 }
 
@@ -529,7 +539,28 @@ impl Writer {
             root: None,
             used: 0,
             full: false,
+            full_limit: 0,
+            measured: None,
+            recheck_every: RECHECK_FULL_EVERY,
         }
+    }
+
+    /// While full: measures the folder again when the limit changed or a while has passed, and
+    /// lifts `full` when the folder has room under the limit again.
+    fn recheck(&mut self, root: &Path, max_total: u64) {
+        let due = max_total != self.full_limit
+            || self
+                .measured
+                .is_none_or(|at| at.elapsed() >= self.recheck_every);
+        if !due {
+            return;
+        }
+        // What waits in the buffers counts too.
+        self.flush();
+        self.used = folder_size(root);
+        self.measured = Some(Instant::now());
+        self.full_limit = max_total;
+        self.full = self.used >= max_total;
     }
 
     fn open(key: &FileKey, part: u32, ms: i64) -> io::Result<Open> {
@@ -581,6 +612,9 @@ impl Writer {
             self.used = folder_size(root);
             self.full = false;
         }
+        if self.full {
+            self.recheck(root, limits.max_total);
+        }
         let line = match key.format {
             Format::Jsonl => json_line(fields),
             Format::Csv => csv_line(fields),
@@ -589,7 +623,11 @@ impl Writer {
         let new_file = !self.files.contains_key(&key);
         let extra = header.as_ref().filter(|_| new_file).map_or(0, String::len) as u64;
         if self.full || self.used + line.len() as u64 + extra > limits.max_total {
-            self.full = true;
+            if !self.full {
+                self.full = true;
+                self.full_limit = limits.max_total;
+                self.measured = Some(Instant::now());
+            }
             return Ok(Wrote::Full);
         }
         if let Some(open) = self.files.get(&key)
@@ -686,10 +724,17 @@ fn run_writer(
             }) => match writer.write(&root, key, &fields, limits, ms) {
                 Ok(Wrote::Saved) => {
                     saved.fetch_add(1, Ordering::Relaxed);
+                    if full.swap(false, Ordering::Relaxed) {
+                        eprintln!(
+                            "[data_exporter] room again under the disk limit: saving resumed"
+                        );
+                    }
                 }
                 Ok(Wrote::Full) => {
                     if !full.swap(true, Ordering::Relaxed) {
-                        eprintln!("[data_exporter] disk limit reached: nothing more is saved");
+                        eprintln!(
+                            "[data_exporter] disk limit reached: nothing is saved until there is room again"
+                        );
                     }
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
@@ -847,7 +892,6 @@ fn reload(shared: &Shared) {
     match result {
         Ok(profile) => {
             replace(shared, profile);
-            shared.full.store(false, Ordering::Relaxed);
             *error = None;
         }
         Err(message) => {
@@ -1314,6 +1358,81 @@ mod tests {
         writer.flush();
         assert_eq!(fs::metadata(dir.join("earlier.jsonl")).unwrap().len(), 200);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    fn tight(max_total: u64) -> Limits {
+        Limits {
+            max_file: 1 << 20,
+            max_total,
+        }
+    }
+
+    #[test]
+    fn a_raised_limit_resumes_saving_at_once() {
+        let dir = scratch();
+        fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
+        let mut writer = Writer::new();
+        let line = || record("x");
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &line(), tight(260), 0)
+                .unwrap(),
+            Wrote::Full
+        );
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &line(), tight(260), 0)
+                .unwrap(),
+            Wrote::Full
+        );
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &line(), tight(1 << 20), 0)
+                .unwrap(),
+            Wrote::Saved
+        );
+    }
+
+    #[test]
+    fn freeing_space_in_the_same_folder_resumes_saving() {
+        let dir = scratch();
+        fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
+        let mut writer = Writer::new();
+        writer.recheck_every = Duration::ZERO;
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &record("x"), tight(260), 0)
+                .unwrap(),
+            Wrote::Full
+        );
+        fs::remove_file(dir.join("earlier.jsonl")).unwrap();
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &record("x"), tight(260), 0)
+                .unwrap(),
+            Wrote::Saved
+        );
+    }
+
+    #[test]
+    fn a_full_folder_is_not_measured_on_every_record() {
+        let dir = scratch();
+        fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
+        let mut writer = Writer::new();
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &record("x"), tight(260), 0)
+                .unwrap(),
+            Wrote::Full
+        );
+        // Room again, but the folder isn't measured until the recheck is due.
+        fs::remove_file(dir.join("earlier.jsonl")).unwrap();
+        assert_eq!(
+            writer
+                .write(&dir, key(&dir, Format::Jsonl), &record("x"), tight(260), 0)
+                .unwrap(),
+            Wrote::Full
+        );
     }
 
     #[test]
