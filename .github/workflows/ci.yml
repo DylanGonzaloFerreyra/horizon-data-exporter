@@ -4,6 +4,9 @@ on:
   pull_request:
 permissions:
   contents: read
+env:
+  # The Horizon build horizon-mod.toml pins: its `cargo horizon-mod` fetches the matching SDK.
+  HORIZON_REV: dd67b76ff23e28c6d8e21859df600d31572f81a0
 jobs:
   check:
     strategy:
@@ -13,10 +16,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-      - run: cargo fetch --locked
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Install cargo-horizon-mod at the pinned build
+        run: cargo install --locked --git https://github.com/horizon-rust/horizon --rev "$HORIZON_REV" cargo-horizon-mod
+      - name: Package (fetches the SDK into .horizon/sdk)
+        run: cargo horizon-mod build
+      - run: cargo horizon-mod check target/horizon-mod/data_exporter.hmod --kind native-mod
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - run: cargo test --workspace --locked --offline
-      - run: python3 tools/package.py
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked

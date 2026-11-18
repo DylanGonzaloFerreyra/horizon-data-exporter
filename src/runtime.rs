@@ -1,6 +1,5 @@
 // Data Exporter: saves what happens in the game to files on the player's computer.
-// This file is the mod's Cargo library (its tests) and the module the bundle adds to the
-// game. It knows nothing of the game: `glue.rs` turns the game's hooks into `emit` calls.
+// It knows nothing of the game: `lib.rs` turns the game's hooks into `emit` calls.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -12,9 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const ID: &str = "data_exporter";
-pub const NAME: &str = "Data Exporter";
-pub const VERSION: &str = "0.1.1";
-pub const DESCRIPTION: &str = "Saves what happens in your game and your statistics to files on your computer, ready to analyze. Nothing is sent over the network.";
+pub const VERSION: &str = "0.2.0";
 
 /// The profile's file name in the game's `config/` folder.
 pub const PROFILE_FILE: &str = "data_exporter.json";
@@ -92,9 +89,11 @@ impl Format {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Field {
-    Text(String),
+    Str(String),
     Int(i64),
     Float(f64),
+    /// No hook writes one yet; the writers handle it.
+    #[allow(dead_code)]
     Bool(bool),
     Null,
 }
@@ -102,7 +101,7 @@ pub enum Field {
 impl Field {
     fn json(&self) -> String {
         match self {
-            Self::Text(text) => serde_json::Value::from(text.as_str()).to_string(),
+            Self::Str(text) => serde_json::Value::from(text.as_str()).to_string(),
             Self::Int(value) => value.to_string(),
             Self::Float(value) if value.is_finite() => value.to_string(),
             Self::Bool(value) => value.to_string(),
@@ -111,7 +110,7 @@ impl Field {
     }
     fn csv(&self) -> String {
         match self {
-            Self::Text(text) => csv_escape(text),
+            Self::Str(text) => csv_escape(text),
             Self::Int(value) => value.to_string(),
             Self::Float(value) if value.is_finite() => value.to_string(),
             Self::Bool(value) => value.to_string(),
@@ -316,8 +315,7 @@ impl Profile {
     }
 
     /// Turns the whole group on, unless it is all on already.
-    pub fn flip_group(&mut self, group: usize) {
-        let on = self.group(group) != Some(true);
+    pub fn set_group(&mut self, group: usize, on: bool) {
         for kind in kinds().filter(|k| k.group == group) {
             self.capture.insert(kind.id.to_owned(), on);
         }
@@ -487,7 +485,7 @@ struct Open {
 }
 
 /// The files being written. Lives on the writer thread, so the game never waits for the disk.
-struct Writer {
+struct RecordWriter {
     files: HashMap<FileKey, Open>,
     root: Option<PathBuf>,
     used: u64,
@@ -532,7 +530,7 @@ enum Wrote {
     Full,
 }
 
-impl Writer {
+impl RecordWriter {
     fn new() -> Self {
         Self {
             files: HashMap::new(),
@@ -697,12 +695,57 @@ static SHARED: OnceLock<Shared> = OnceLock::new();
 /// The world owner, kept from when the game could say: it can't during a player's packet.
 static OWNER: Mutex<Option<u128>> = Mutex::new(None);
 
+/// Records heard before the world's owner is known, with their player: the server tells of the
+/// owner's own join before the window says who its player is.
+type Held = Vec<(u128, String, &'static str, Fields)>;
+static HELD: Mutex<Held> = Mutex::new(Vec::new());
+/// At most this many records wait for the owner; a server with no window never names one.
+const HELD_MAX: usize = 16;
+
+/// Notes the world's owner, then saves the records that waited for them and drops the others'.
+/// The owner is set under the held records' lock, so a record `hold` is keeping right now is
+/// either taken here or sees the owner there: none is left waiting.
 pub fn remember_owner(uuid: u128) {
-    *OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(uuid);
+    let mine = {
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        *OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(uuid);
+        take_owners(&mut held, uuid)
+    };
+    for (_, world, id, fields) in mine {
+        emit(&world, id, fields);
+    }
 }
 
 pub fn is_owner(uuid: u128) -> bool {
     *OWNER.lock().unwrap_or_else(|e| e.into_inner()) == Some(uuid)
+}
+
+pub fn owner_known() -> bool {
+    OWNER.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// Keeps a record of `player`'s until the owner is known, when it is saved if `player` is the owner.
+/// An owner named meanwhile decides at once: the record is saved for them, dropped for others.
+pub fn hold(player: u128, world: &str, id: &'static str, fields: Fields) {
+    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    let owner = *OWNER.lock().unwrap_or_else(|e| e.into_inner());
+    match owner {
+        Some(owner) if owner == player => {
+            drop(held);
+            emit(world, id, fields);
+        }
+        Some(_) => {}
+        None if held.len() < HELD_MAX => held.push((player, world.to_owned(), id, fields)),
+        None => {}
+    }
+}
+
+/// Takes every held record, keeping the owner's in the order they came.
+fn take_owners(held: &mut Held, owner: u128) -> Held {
+    std::mem::take(held)
+        .into_iter()
+        .filter(|(player, ..)| *player == owner)
+        .collect()
 }
 
 fn run_writer(
@@ -711,7 +754,7 @@ fn run_writer(
     dropped: Arc<AtomicU64>,
     full: Arc<AtomicBool>,
 ) {
-    let mut writer = Writer::new();
+    let mut writer = RecordWriter::new();
     let mut failed_once = false;
     loop {
         match receiver.recv_timeout(FLUSH_EVERY) {
@@ -914,9 +957,9 @@ pub fn emit(world: &str, id: &'static str, fields: Fields) {
     let ms = now_ms();
     let mut all: Fields = vec![
         ("schema", Field::Int(SCHEMA)),
-        ("ts", Field::Text(iso(ms))),
-        ("event", Field::Text(id.to_owned())),
-        ("world", Field::Text(world.to_owned())),
+        ("ts", Field::Str(iso(ms))),
+        ("event", Field::Str(id.to_owned())),
+        ("world", Field::Str(world.to_owned())),
     ];
     all.extend(fields);
     let message = Message::Record {
@@ -965,36 +1008,6 @@ pub fn sample_due(player: u128) -> bool {
     }
 }
 
-const BUTTON_FORMAT: usize = GROUPS.len();
-const BUTTON_OPEN: usize = BUTTON_FORMAT + 1;
-const BUTTON_COPY: usize = BUTTON_FORMAT + 2;
-
-/// The buttons of the mod's page in Options > Mods.
-pub fn labels() -> Vec<String> {
-    let Some(shared) = SHARED.get() else {
-        return Vec::new();
-    };
-    reload(shared);
-    let profile = current(shared);
-    let mut buttons: Vec<String> = GROUPS
-        .iter()
-        .enumerate()
-        .map(|(group, name)| {
-            let state = match profile.group(group) {
-                Some(true) => "ON",
-                Some(false) => "OFF",
-                None => "MIXED",
-            };
-            format!("{name}: {state}")
-        })
-        .collect();
-    buttons.push(format!("Format: {}", profile.format.id().to_uppercase()));
-    buttons.push("Open profile location".to_owned());
-    buttons.push("Copy profile path".to_owned());
-    buttons.push(status(shared));
-    buttons
-}
-
 fn status(shared: &Shared) -> String {
     if shared
         .error
@@ -1014,12 +1027,10 @@ fn status(shared: &Shared) -> String {
     )
 }
 
-/// What a click asks the game to do.
+/// What a settings change did: nothing to say, or why the profile could not be saved.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Click {
     Nothing,
-    Open(PathBuf),
-    Copy(String),
     Failed(String),
 }
 
@@ -1035,22 +1046,50 @@ fn edit_profile(shared: &Shared, change: impl FnOnce(&mut Profile)) -> Click {
     Click::Nothing
 }
 
-pub fn click(button: usize) -> Click {
+/// A group's state for the settings page: on, off, or None when only some of its kinds are on.
+pub fn group_on(group: usize) -> Option<bool> {
+    SHARED.get().and_then(|shared| current(shared).group(group))
+}
+
+/// Turns a group on or off, as the settings page's toggle does. A group already so is left alone,
+/// so a hand-made mix in the profile survives a toggle that didn't change.
+pub fn set_group(group: usize, on: bool) -> Click {
     let Some(shared) = SHARED.get() else {
         return Click::Nothing;
     };
-    match button {
-        group if group < GROUPS.len() => edit_profile(shared, |p| p.flip_group(group)),
-        BUTTON_FORMAT => edit_profile(shared, |p| {
-            p.format = match p.format {
-                Format::Jsonl => Format::Csv,
-                Format::Csv => Format::Jsonl,
-            }
-        }),
-        BUTTON_OPEN => Click::Open(shared.path.clone()),
-        BUTTON_COPY => Click::Copy(shared.path.display().to_string()),
-        _ => Click::Nothing,
+    if group >= GROUPS.len() || current(shared).group(group) == Some(on) {
+        return Click::Nothing;
     }
+    edit_profile(shared, |p| p.set_group(group, on))
+}
+
+/// Whether the profile writes CSV (else JSON Lines).
+pub fn csv() -> bool {
+    SHARED
+        .get()
+        .is_some_and(|shared| current(shared).format == Format::Csv)
+}
+
+/// Sets the profile's format, as the settings page's choice does.
+pub fn set_csv(csv: bool) -> Click {
+    let Some(shared) = SHARED.get() else {
+        return Click::Nothing;
+    };
+    let format = if csv { Format::Csv } else { Format::Jsonl };
+    if current(shared).format == format {
+        return Click::Nothing;
+    }
+    edit_profile(shared, |p| p.format = format)
+}
+
+/// What the mod saved and dropped so far, or why it can't save, for a line in chat.
+pub fn status_line() -> Option<String> {
+    SHARED.get().map(status)
+}
+
+/// The profile's path.
+pub fn profile_path() -> Option<PathBuf> {
+    SHARED.get().map(|shared| shared.path.clone())
 }
 
 /// Shows `path` in the system's file manager.
@@ -1121,7 +1160,7 @@ mod tests {
 
     fn record(text: &str) -> Fields {
         vec![
-            ("event", Field::Text(text.to_owned())),
+            ("event", Field::Str(text.to_owned())),
             ("count", Field::Int(3)),
             ("ratio", Field::Float(0.5)),
             ("ok", Field::Bool(true)),
@@ -1193,13 +1232,29 @@ mod tests {
     }
 
     #[test]
-    fn a_group_button_turns_all_of_a_mixed_group_on_then_off() {
+    fn records_held_for_the_owner_keep_only_the_owners_in_order_and_are_bounded() {
+        for i in 0..20u128 {
+            let player = if i % 2 == 0 { 7 } else { 9 };
+            hold(player, "w", "session", vec![("n", Field::Int(i as i64))]);
+        }
+        let mine = take_owners(&mut HELD.lock().unwrap(), 7);
+        let order: Vec<_> = mine.iter().map(|(_, _, _, f)| f[0].1.clone()).collect();
+        let expected: Vec<_> = (0..16).step_by(2).map(Field::Int).collect();
+        assert_eq!(order, expected);
+        assert!(
+            HELD.lock().unwrap().is_empty(),
+            "taken once, the others' are dropped"
+        );
+    }
+
+    #[test]
+    fn a_group_toggle_turns_all_of_a_mixed_group_on_then_off() {
         let mut profile = Profile::default();
         profile.capture.insert("block_placed".to_owned(), false);
         assert_eq!(profile.group(1), None);
-        profile.flip_group(1);
+        profile.set_group(1, true);
         assert_eq!(profile.group(1), Some(true));
-        profile.flip_group(1);
+        profile.set_group(1, false);
         assert_eq!(profile.group(1), Some(false));
         assert_eq!(profile.group(0), Some(true));
     }
@@ -1305,7 +1360,7 @@ mod tests {
     #[test]
     fn a_csv_file_has_one_header_then_its_rows() {
         let dir = scratch();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         for _ in 0..2 {
             let wrote = writer
                 .write(&dir, key(&dir, Format::Csv), &record("x"), limits(), 0)
@@ -1322,7 +1377,7 @@ mod tests {
     #[test]
     fn a_file_past_its_size_continues_in_a_new_part() {
         let dir = scratch();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         let small = Limits {
             max_file: 60,
             max_total: 1 << 30,
@@ -1346,7 +1401,7 @@ mod tests {
     fn the_disk_limit_stops_saving_and_deletes_nothing() {
         let dir = scratch();
         fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         let tight = Limits {
             max_file: 1 << 20,
             max_total: 260,
@@ -1371,7 +1426,7 @@ mod tests {
     fn a_raised_limit_resumes_saving_at_once() {
         let dir = scratch();
         fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         let line = || record("x");
         assert_eq!(
             writer
@@ -1397,7 +1452,7 @@ mod tests {
     fn freeing_space_in_the_same_folder_resumes_saving() {
         let dir = scratch();
         fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         writer.recheck_every = Duration::ZERO;
         assert_eq!(
             writer
@@ -1418,7 +1473,7 @@ mod tests {
     fn a_full_folder_is_not_measured_on_every_record() {
         let dir = scratch();
         fs::write(dir.join("earlier.jsonl"), vec![b'x'; 200]).unwrap();
-        let mut writer = Writer::new();
+        let mut writer = RecordWriter::new();
         assert_eq!(
             writer
                 .write(&dir, key(&dir, Format::Jsonl), &record("x"), tight(260), 0)
@@ -1438,7 +1493,7 @@ mod tests {
     #[test]
     fn a_second_writer_never_shares_a_file_with_the_first() {
         let dir = scratch();
-        let (mut one, mut two) = (Writer::new(), Writer::new());
+        let (mut one, mut two) = (RecordWriter::new(), RecordWriter::new());
         for writer in [&mut one, &mut two] {
             writer
                 .write(&dir, key(&dir, Format::Jsonl), &record("x"), limits(), 0)

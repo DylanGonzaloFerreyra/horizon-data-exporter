@@ -1,0 +1,14 @@
+{
+  "data_exporter.setting.session_player": "Session & player",
+  "data_exporter.setting.session_player.tooltip": "Joins and leaves, dimension changes, and a sample of each player's position, health and food.",
+  "data_exporter.setting.blocks_combat": "Blocks & combat",
+  "data_exporter.setting.blocks_combat.tooltip": "Blocks broken and placed, deaths, and mobs killed.",
+  "data_exporter.setting.items_progress": "Items & progress",
+  "data_exporter.setting.items_progress.tooltip": "Crafting, pickups and advancements.",
+  "data_exporter.setting.statistics": "Statistics",
+  "data_exporter.setting.statistics.tooltip": "Every statistic the game awards, except the ones that only count time.",
+  "data_exporter.setting.format": "Format",
+  "data_exporter.setting.format.tooltip": "The files' format. A kind with its own format in the profile keeps it.",
+  "data_exporter.setting.format.jsonl": "JSON Lines",
+  "data_exporter.setting.format.csv": "CSV"
+}

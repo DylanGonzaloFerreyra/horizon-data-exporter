@@ -1,0 +1,20 @@
+id = "data_exporter"
+name = "Data Exporter"
+version = "0.2.0"
+description = "Saves what happens in your game and your statistics to files on your computer, ready to analyze. Nothing is sent over the network."
+authors = ["DylanGonzaloFerreyra"]
+license = "MIT"
+license_url = "https://github.com/DylanGonzaloFerreyra/horizon-data-exporter/blob/main/LICENSE"
+homepage = "https://github.com/DylanGonzaloFerreyra/horizon-data-exporter"
+issues = "https://github.com/DylanGonzaloFerreyra/horizon-data-exporter/issues"
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins.
+api = "0.2"
+# Server hooks hear the events; one client hook notes who owns a single-player world, and the
+# settings are on the client.
+side = "both"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "dd67b76ff23e28c6d8e21859df600d31572f81a0"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

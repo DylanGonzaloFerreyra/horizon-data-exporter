@@ -1,18 +1,13 @@
 [package]
-name = "horizon-data-exporter"
-version = "0.1.1"
+name = "mod-data_exporter"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.95"
 license = "MIT"
 publish = false
 description = "A native Horizon mod that saves what happens in your game to files on your computer"
 
-[lib]
-# This exact source is also injected into the game as a module by horizon-mixins.
-path = "mixins/data_exporter/runtime.rs"
-
 [dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build).
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 serde_json = "1"
-
-[workspace]
-resolver = "2"
