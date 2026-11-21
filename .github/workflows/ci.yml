@@ -23,6 +23,7 @@ jobs:
       - name: Package (fetches the SDK into .horizon/sdk)
         run: cargo horizon-mod build
       - run: cargo horizon-mod check target/horizon-mod/data_exporter.hmod --kind native-mod
-      - run: cargo fmt --all --check
+      # The mod only: `--all` would also check the SDK crates cargo horizon-mod fetches.
+      - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
